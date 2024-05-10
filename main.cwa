@@ -7,42 +7,48 @@ const SPEED = 180.0;
 const DASH_SPEED = 60.0;
 const PLAYER_SIZE = 8.0;
 
-// -------------------------
-// |  |  |  |  |  |  |  |  |
-// -------------------------
-//    ^        ^            ^
-//    |     ghost_index     |
-//    |                  0x40000
-// 0x40000 - ghost_len * 8
-// where ghost_len = 7
-//       ghost_index = 3
+// GHOST_DATA: [0x4000; (i16, i16)]
+// ghostHead indexes where the next ghost should be written
+// ghostTail indexes the oldest ghost
+// GHOST_DATA[ghostTail..ghostHead] is all ghosts from oldest to youngest
+//   - this slice will always be contiguous;  all data is copied to
+//     the beginning of GHOST_DATA when ghostHead would exceed 0x4000
+//   - the length of this slice will be smaller than ghostLen if
+//     the game has recently started or ghostLen was recently increased.
+// ghostHead - ghostTail <= ghostLen
 
-const GHOST_FPS = 60.0;
-const GHOST_DATA = 0x40000;
+const GHOST_FPS = 70.0;
+const GHOST_DATA = 0x30000;
+const GHOST_CAP = 0x4000;
 global mut prevTimeGhost = 0.0;
-global mut ghost_len = 120;
-global mut ghost_index = 0;
+global mut ghostLen = 210;
+global mut ghostHead = 0;
+global mut ghostTail = 0;
 
-export fn start() {
-    clearGhosts();
-}
+const MOVE_ITERS = 10;
 
 fn clearGhosts() {
-    let i = GHOST_DATA - 8 * ghost_len;
-    loop ghostClear {
-        i$0 = -10000.0;
-        i$4 + -10000.0;
-        branch_if (i := i + 8) < GHOST_DATA: ghostClear;
-    }
+    ghostTail = ghostHead;
 }
 
 fn pushGhost() {
-    let ptr = GHOST_DATA - 8 * (ghost_len - ghost_index);
-    printChar('\06');
-    printInt(ptr);
-    ptr$0 = x;
-    ptr$4 = y;
-    ghost_index = (ghost_index + 1) % ghost_len;
+    if ghostHead >= GHOST_CAP {
+        let i: i32;
+        loop GhostCopy {
+            if i + ghostTail < ghostHead {
+                (i*4)!GHOST_DATA = ((i+ghostTail)*4)!GHOST_DATA;
+                i += 1;
+                branch GhostCopy;
+            }
+        }
+        ghostHead = i;
+        ghostTail = 0;
+    }
+    (ghostHead*4)!GHOST_DATA = ((x as i32 << 16) | y as i32) ^ (1 << 30);
+    ghostHead += 1;
+    if ghostHead - ghostTail > ghostLen {
+        ghostTail = ghostHead - ghostLen;
+    }
 }
 
 export fn upd() {
@@ -70,34 +76,96 @@ export fn upd() {
     }
     let nx = x;
     let ny = y;
-    if isButtonTriggered(BUTTON_B) {
+    let isDash = isButtonTriggered(BUTTON_B);
+    if isDash {
         nx += mx * DASH_SPEED;
         ny += my * DASH_SPEED;
+        nx = clamp(nx, PLAYER_SIZE, 320.0 - PLAYER_SIZE);
+        ny = clamp(ny, PLAYER_SIZE, 240.0 - PLAYER_SIZE);
     } else {
-        nx += mx * SPEED * dt;
-        ny += my * SPEED * dt;
-    }
-    nx = clamp(nx, PLAYER_SIZE, 320.0 - PLAYER_SIZE);
-    ny = clamp(ny, PLAYER_SIZE, 240.0 - PLAYER_SIZE);
-    let i = GHOST_DATA - 8 * ghost_len;
-    loop ghostCollide {
-        let dist = sqrt(pow(nx - i$0, 2.0) + pow(ny - i$4, 2.0));
-        let lmao = sqrt(pow( x - i$0, 2.0) + pow( y - i$4, 2.0));
-        if dist < 2.0 * PLAYER_SIZE & lmao > 2.0 * PLAYER_SIZE {
-            nx = x;
-            ny = y;
-        } else {
-            branch_if (i := i + 8) < GHOST_DATA: ghostCollide;
+        let iters: i32;
+        loop GhostCollideIter {
+        let oldX = nx;
+        let oldY = ny;
+        nx += mx * SPEED * dt / MOVE_ITERS as f32;
+        ny += my * SPEED * dt / MOVE_ITERS as f32;
+        nx = clamp(nx, PLAYER_SIZE, 320.0 - PLAYER_SIZE);
+        ny = clamp(ny, PLAYER_SIZE, 240.0 - PLAYER_SIZE);
+        let i = ghostTail;
+        let didCollide: i32;
+        loop GhostCollide {
+            if i < ghostHead {
+                let data = (i*4)!GHOST_DATA;
+                if !((data >> 31) ^ (data >> 30) & 1) {
+                let ix = (data >> 16) as f32;
+                let iy = sext16(data & 0xffff) as f32;
+                let dist = sqrt(pow(nx - ix, 2.0) + pow(ny - iy, 2.0));
+                if dist < 2.0 * PLAYER_SIZE & (nx != ix | ny != iy) {
+                    didCollide = 1;
+                    let dx = nx - ix;
+                    let dy = ny - iy;
+                    let dMag = 2.0 * PLAYER_SIZE / sqrt(dx * dx + dy * dy);
+                    dx *= dMag;
+                    dy *= dMag;
+                    nx = ix + dx;
+                    ny = iy + dy;
+                }
+                }
+                i += 1;
+                branch GhostCollide;
+            }
+        }
+        if didCollide {
+        didCollide = 0;
+        loop GhostCollidePost {
+            if i < ghostHead {
+                let data = (i*4)!GHOST_DATA;
+                if !((data >> 31) ^ (data >> 30) & 1) {
+                let ix = (data >> 16) as f32;
+                let iy = sext16(data & 0xffff) as f32;
+                let dist = sqrt(pow(nx - ix, 2.0) + pow(ny - iy, 2.0));
+                if dist < 2.0 * PLAYER_SIZE & (nx != ix | ny != iy) {
+                    didCollide = 1;
+                    nx = oldX;
+                    ny = oldY;
+                } else {
+                    i += 1;
+                    branch GhostCollidePost;
+                }
+                }  else {
+                    i += 1;
+                    branch GhostCollidePost;
+                }
+            }
+        }
+        }
+        branch_if !didCollide & ((iters := iters + 1) < MOVE_ITERS): GhostCollideIter;
         }
     }
     x = nx;
     y = ny;
-    let i = 0;
-    loop ghosts {
-        let ptr = GHOST_DATA - 8 * ghost_len + (ghost_index + i) % ghost_len * 8;
-        let meow = i as f32 / ghost_len as f32 * 3.0;
-        circle(ptr$0, ptr$4, PLAYER_SIZE, meow as i32 + (fmod(meow, 1.0) > randomf()) + 1);
-        branch_if (i := i + 1) < ghost_len: ghosts;
+    let i = ghostTail;
+    let data: i32;
+    loop GhostDraw {
+        if i < ghostHead {
+            data = (i*4)!GHOST_DATA;
+            let isActive = !(((data >> 31) ^ (data >> 30)) & 1);
+            data ^= !isActive << 30;
+            let ix = (data >> 16) as f32;
+            let iy = sext16(data & 0xffff) as f32;
+            let dist = sqrt(pow(x - ix, 2.0) + pow(y - iy, 2.0));
+            if !isActive & dist >= 2.0*PLAYER_SIZE {
+                isActive = 1;
+                (i*4)!GHOST_DATA = data;
+            }
+            let color = {
+                let meow = (ghostHead - i) as f32 / (ghostHead - ghostTail) as f32 * -3.0;
+                meow as i32 + (fmod(meow, 1.0) > randomf()) + 4
+            };
+            circle(ix, iy, PLAYER_SIZE, color);
+            i += 1;
+            branch GhostDraw;
+        }
     }
     circle(floor(x), floor(y), PLAYER_SIZE, 15);
     i = (GHOST_FPS * (time() - prevTimeGhost)) as i32;
@@ -109,6 +177,10 @@ export fn upd() {
             branch ghostsToAdd;
         }
     }
+}
+
+fn sext16(v: i32) -> i32 {
+    v + (v #>> 15) * 0xffff0000
 }
 
 fn clamp(v: f32, min: f32, max: f32) -> f32 {
