@@ -4,8 +4,9 @@ global mut x = 160.0;
 global mut y = 120.0;
 global mut prevTime = 0.0;
 const SPEED = 180.0;
-const DASH_SPEED = 60.0;
+const DASH_DISTANCE = 60.0;
 const PLAYER_SIZE = 8.0;
+const MOVE_ITERS = 10;
 
 // GHOST_DATA: [0x4000; (i16, i16)]
 // ghostHead indexes where the next ghost should be written
@@ -19,13 +20,21 @@ const PLAYER_SIZE = 8.0;
 
 const GHOST_FPS = 70.0;
 const GHOST_DATA = 0x30000;
-const GHOST_CAP = 0x4000;
+const GHOST_CAP = (0x40000 - GHOST_DATA) / 4;
 global mut prevTimeGhost = 0.0;
 global mut ghostLen = 210;
 global mut ghostHead = 0;
 global mut ghostTail = 0;
 
-const MOVE_ITERS = 10;
+// Static bodies are stored as a null terminated array of
+// { x: u8, y: u8, r: u8, _: u8 }.
+const STATIC_DATA = 0x28000;
+
+export fn start() {
+    0!STATIC_DATA = 0x507820;
+    4!STATIC_DATA = 0xf07820;
+    8!STATIC_DATA = 0;
+}
 
 fn clearGhosts() {
     ghostTail = ghostHead;
@@ -49,6 +58,20 @@ fn pushGhost() {
     if ghostHead - ghostTail > ghostLen {
         ghostTail = ghostHead - ghostLen;
     }
+}
+
+// If circles C1 and C2 collide, returns 1 and assigns a new C1 in x and y
+// so that it touches C2 exactly. Else, returns 0 and dx and dy are unspecified.
+global mut circleCollide_x = 0.0;
+global mut circleCollide_y = 0.0;
+fn circleCollide(x1: f32, y1: f32, r1: f32, x2: f32, y2: f32, r2: f32) -> i32 {
+    let gpX = x1 - x2;
+    let gpY = y1 - y2;
+    let mag = sqrt(gpX * gpX + gpY * gpY);
+    let r = r1 + r2;
+    circleCollide_x = x2 + r / mag * gpX;
+    circleCollide_y = y2 + r / mag * gpY;
+    mag < r
 }
 
 export fn upd() {
@@ -78,8 +101,8 @@ export fn upd() {
     let ny = y;
     let isDash = isButtonTriggered(BUTTON_B);
     if isDash {
-        nx += mx * DASH_SPEED;
-        ny += my * DASH_SPEED;
+        nx += mx * DASH_DISTANCE;
+        ny += my * DASH_DISTANCE;
         nx = clamp(nx, PLAYER_SIZE, 320.0 - PLAYER_SIZE);
         ny = clamp(ny, PLAYER_SIZE, 240.0 - PLAYER_SIZE);
     } else {
@@ -97,54 +120,73 @@ export fn upd() {
             if i < ghostHead {
                 let data = (i*4)!GHOST_DATA;
                 if !((data >> 31) ^ (data >> 30) & 1) {
-                let ix = (data >> 16) as f32;
-                let iy = sext16(data & 0xffff) as f32;
-                let dist = sqrt(pow(nx - ix, 2.0) + pow(ny - iy, 2.0));
-                if dist < 2.0 * PLAYER_SIZE & (nx != ix | ny != iy) {
-                    didCollide = 1;
-                    let dx = nx - ix;
-                    let dy = ny - iy;
-                    let dMag = 2.0 * PLAYER_SIZE / sqrt(dx * dx + dy * dy);
-                    dx *= dMag;
-                    dy *= dMag;
-                    nx = ix + dx;
-                    ny = iy + dy;
-                }
+                    let ix = (data >> 16) as f32;
+                    let iy = sext16(data & 0xffff) as f32;
+                    if circleCollide(nx, ny, PLAYER_SIZE, ix, iy, PLAYER_SIZE) {
+                        didCollide = 1;
+                        nx = circleCollide_x;
+                        ny = circleCollide_y;
+                    }
                 }
                 i += 1;
                 branch GhostCollide;
             }
         }
-        if didCollide {
-        didCollide = 0;
-        loop GhostCollidePost {
-            if i < ghostHead {
-                let data = (i*4)!GHOST_DATA;
-                if !((data >> 31) ^ (data >> 30) & 1) {
-                let ix = (data >> 16) as f32;
-                let iy = sext16(data & 0xffff) as f32;
-                let dist = sqrt(pow(nx - ix, 2.0) + pow(ny - iy, 2.0));
-                if dist < 2.0 * PLAYER_SIZE & (nx != ix | ny != iy) {
-                    didCollide = 1;
-                    nx = oldX;
-                    ny = oldY;
-                } else {
-                    i += 1;
-                    branch GhostCollidePost;
+        i = 0;
+        loop StaticCollide {
+            let staticX = (i*4 + 2)?STATIC_DATA;
+            let staticY = (i*4 + 1)?STATIC_DATA;
+            let staticR = (i*4)?STATIC_DATA;
+            if staticX | staticY | staticR {
+                if circleCollide(nx, ny, PLAYER_SIZE, staticX as f32, staticY as f32, staticR as f32) {
+                    //didCollide = 1;
+                    nx = circleCollide_x;
+                    ny = circleCollide_y;
                 }
-                }  else {
-                    i += 1;
-                    branch GhostCollidePost;
+                i += 1;
+                branch StaticCollide;
+            }
+        }            
+        if didCollide {
+            didCollide = 0;
+            loop GhostCollidePost {
+                if i < ghostHead {
+                    let data = (i*4)!GHOST_DATA;
+                    if !((data >> 31) ^ (data >> 30) & 1) {
+                        let ix = (data >> 16) as f32;
+                        let iy = sext16(data & 0xffff) as f32;
+                        if circleCollide(nx, ny, PLAYER_SIZE, ix, iy, PLAYER_SIZE) {
+                            didCollide = 1;
+                            nx = oldX;
+                            ny = oldY;
+                        } else {
+                            i += 1;
+                            branch GhostCollidePost;
+                        }
+                    } else {
+                        i += 1;
+                        branch GhostCollidePost;
+                    }
                 }
             }
-        }
         }
         branch_if !didCollide & ((iters := iters + 1) < MOVE_ITERS): GhostCollideIter;
         }
     }
     x = nx;
     y = ny;
-    let i = ghostTail;
+    let i: i32;
+    loop StaticDraw {
+        let staticX = (i*4 + 2)?STATIC_DATA;
+        let staticY = (i*4 + 1)?STATIC_DATA;
+        let staticR = (i*4)?STATIC_DATA;
+        if staticX | staticY | staticR {
+            circle(staticX as f32, staticY as f32, staticR as f32, 0x14);
+            i += 1;
+            branch StaticDraw;
+        }
+    }
+    i = ghostTail;
     let data: i32;
     loop GhostDraw {
         if i < ghostHead {
@@ -167,7 +209,7 @@ export fn upd() {
             branch GhostDraw;
         }
     }
-    circle(floor(x), floor(y), PLAYER_SIZE, 15);
+    circle(floor(x), floor(y), PLAYER_SIZE, 0x0f);
     i = (GHOST_FPS * (time() - prevTimeGhost)) as i32;
     loop ghostsToAdd {
         if i {
