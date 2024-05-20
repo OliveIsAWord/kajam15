@@ -38,6 +38,7 @@ import "env.sndGes" fn sndGes(i32) -> f32;
 
 const TIME_MS = 0x40;
 const GAMEPAD = 0x44;
+const SOUND_DATA = 0x50;
 const FRAMEBUFFER = 0x78;
 const PALETTE = 0x13000;
 const FONT = 0x13400;

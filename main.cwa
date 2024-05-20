@@ -4,9 +4,11 @@ global mut x = 160.0;
 global mut y = 120.0;
 global mut prevTime = 0.0;
 const SPEED = 180.0;
-const DASH_DISTANCE = 60.0;
+const DASH_DISTANCE = 80.0;
 const PLAYER_SIZE = 8.0;
 const MOVE_ITERS = 10;
+
+const TIMING_FUDGE = 0.1;
 
 // GHOST_DATA: [0x4000; (i16, i16)]
 // ghostHead indexes where the next ghost should be written
@@ -17,7 +19,6 @@ const MOVE_ITERS = 10;
 //   - the length of this slice will be smaller than ghostLen if
 //     the game has recently started or ghostLen was recently increased.
 // ghostHead - ghostTail <= ghostLen
-
 const GHOST_FPS = 70.0;
 const GHOST_DATA = 0x30000;
 const GHOST_CAP = (0x40000 - GHOST_DATA) / 4;
@@ -30,14 +31,74 @@ global mut ghostTail = 0;
 // { x: u8, y: u8, r: u8, _: u8 }.
 const STATIC_DATA = 0x28000;
 
-export fn start() {
+// Each monster is a
+// f32 x
+// f32 y
+// u8  kind
+// u8  state
+// i16 data1
+// i32 data2
+const ENEMY_DATA = 0x20000;
+const ENEMY_STRIDE = 0x10;
+global mut enemyLen = 0;
+// Kind 0: null
+// Kind 1: Eighter
+const EIGHTER_T_SPEED = 4.0;
+const EIGHTER_SPEED = 80.0;
+const EIGHTER_SWOOP = 25.0;
+
+data 0x14000 {
+    f32(14.0)
+}
+
+// SOUND_DATA
+// i32 start time in millis (nullable)
+// f32 BPM
+
+global mut firstFrame = 1;
+fn onFirstFrame() {
+    prevTime = time();
+    0!SOUND_DATA = 0!TIME_MS + 1;
+    4$SOUND_DATA = 94.0;
+    
     0!STATIC_DATA = 0x507820;
     4!STATIC_DATA = 0xf07820;
     8!STATIC_DATA = 0;
+
+    0$ENEMY_DATA = 160.0;
+    4$ENEMY_DATA = -30.0;
+    8!ENEMY_DATA = 0x01;
+    12$ENEMY_DATA = 0.0;
+    enemyLen = 1;
+}
+
+fn dashEnemy(x1: f32, y1: f32, x2: f32, y2: f32, i: i32) -> i32 {
+    // https://mathworld.wolfram.com/Circle-LineIntersection.html
+    let ptr = i * ENEMY_STRIDE + ENEMY_DATA;
+    x1 -= ptr$0;
+    x2 -= ptr$0;
+    y1 -= ptr$4;
+    y2 -= ptr$4;
+    let dr = sqrt(pow(x2 - x1, 2.0) + pow(y2 - y1, 2.0));
+    let det = x1 * y2 - x2 * y1;
+    let r = (ptr?8 * 4)$0x13ffc + PLAYER_SIZE + 2.0;
+    let discriminant = r * r * dr * dr - det * det;
+    discriminant >= 0.0
 }
 
 fn clearGhosts() {
     ghostTail = ghostHead;
+}
+
+fn removeEnemy(iiiii: i32) {
+    let aa = iiiii * ENEMY_STRIDE + ENEMY_DATA;
+    let bb = (ghostLen - 1) * ENEMY_STRIDE + ENEMY_DATA;
+    if ENEMY_STRIDE != 16 { 0/0; }
+    aa!0 = bb!0;
+    aa!4 = bb!4;
+    aa!8 = bb!8;
+    aa!12 = bb!12;
+    enemyLen -= 1;
 }
 
 fn pushGhost() {
@@ -60,6 +121,8 @@ fn pushGhost() {
     }
 }
 
+export fn snd(_: i32) -> f32 { 0 as f32 }
+
 // If circles C1 and C2 collide, returns 1 and assigns a new C1 in x and y
 // so that it touches C2 exactly. Else, returns 0 and dx and dy are unspecified.
 global mut circleCollide_x = 0.0;
@@ -67,7 +130,7 @@ global mut circleCollide_y = 0.0;
 fn circleCollide(x1: f32, y1: f32, r1: f32, x2: f32, y2: f32, r2: f32) -> i32 {
     let gpX = x1 - x2;
     let gpY = y1 - y2;
-    let mag = sqrt(gpX * gpX + gpY * gpY);
+    let mag = max(sqrt(gpX * gpX + gpY * gpY), 0.0001);
     let r = r1 + r2;
     circleCollide_x = x2 + r / mag * gpX;
     circleCollide_y = y2 + r / mag * gpY;
@@ -75,7 +138,26 @@ fn circleCollide(x1: f32, y1: f32, r1: f32, x2: f32, y2: f32, r2: f32) -> i32 {
 }
 
 export fn upd() {
+    if firstFrame {
+        firstFrame = 0;
+        onFirstFrame();
+    }
     cls(0);
+    let beat = {
+        let t1 = (0!TIME_MS - 0!SOUND_DATA) as f32 / (60.0 * 1000.0) * 4$SOUND_DATA;
+        fmod(t1, 1.0)
+    };
+    let gridColor = {
+        let t2 = ((1.0 - beat) * 16.0) as i32;
+        t2 / 4 * 16 + t2 / 2 + 18
+    };
+    let gridLen = 25;
+    let gridV = -gridLen / 2;
+    loop GridLines {
+        hline(0, 320, gridV, gridColor);
+        line(gridV as f32, 0.0, gridV as f32, 240.0, gridColor);
+        branch_if (gridV +:= gridLen) < 320: GridLines;
+    }
     let dt = time() - prevTime;
     prevTime = time();
     let mx = if isButtonPressed(BUTTON_LEFT) {
@@ -105,6 +187,19 @@ export fn upd() {
         ny += my * DASH_DISTANCE;
         nx = clamp(nx, PLAYER_SIZE, 320.0 - PLAYER_SIZE);
         ny = clamp(ny, PLAYER_SIZE, 240.0 - PLAYER_SIZE);
+        if (beat - TIMING_FUDGE <= 0.0) | (beat + TIMING_FUDGE >= 1.0) {
+            let enemyI: i32;
+            loop DashEnemy {
+                if enemyI < enemyLen {
+                    if dashEnemy(x, y, nx, ny, enemyI) {
+                        removeEnemy(enemyI);
+                    } else {
+                        enemyI += 1;
+                    }
+                    branch DashEnemy;
+                }
+            }
+        }
     } else {
         let iters: i32;
         loop GhostCollideIter {
@@ -149,7 +244,8 @@ export fn upd() {
     }
     x = nx;
     y = ny;
-    let i: i32;
+    
+    let i: i32 = 0;
     loop StaticDraw {
         let staticX = (i*4 + 2)?STATIC_DATA;
         let staticY = (i*4 + 1)?STATIC_DATA;
@@ -160,6 +256,7 @@ export fn upd() {
             branch StaticDraw;
         }
     }
+    
     i = ghostTail;
     let data: i32;
     loop GhostDraw {
@@ -184,6 +281,43 @@ export fn upd() {
         }
     }
     circle(floor(x), floor(y), PLAYER_SIZE, 0x0f);
+    
+    i = 0;
+    loop EnemyDraw { if i < enemyLen {
+        let enemyPtr = i * ENEMY_STRIDE + ENEMY_DATA;
+        let enemyX = enemyPtr$0;
+        let enemyY = enemyPtr$4;
+        let enemyKind = enemyPtr?8;
+        let enemySize = (enemyKind * 4)$0x13ffc;
+        let enemyColor: i32;
+        if isButtonTriggered(BUTTON_Y) | 1 {
+        if enemyKind == 1 {
+            // Eighter
+            let t = enemyPtr$12;
+            enemyPtr$12 = t + EIGHTER_T_SPEED * dt;
+            // x'(t) = a cos(t)
+            // y'(t) = a (cos^2(t) - sin^2(t))
+            enemyX += EIGHTER_SWOOP * EIGHTER_T_SPEED * dt * (cos(t));
+            enemyY += EIGHTER_SWOOP * EIGHTER_T_SPEED * dt * (cos(t) * cos(t) - sin(t) * sin(t));
+            let targetX = x;
+            let targetY = y;
+            let enemyDirX = targetX - enemyX;
+            let enemyDirY = targetY - enemyY;
+            let enemyDirMag = EIGHTER_SPEED * dt / max(sqrt(enemyDirX * enemyDirX + enemyDirY * enemyDirY), 0.0001);
+            enemyX += enemyDirX * enemyDirMag;
+            enemyY += enemyDirY * enemyDirMag;
+            enemyColor = 0x59;
+        } else {
+            cls(0x44);
+            printInt(enemyKind);
+        }
+        enemyPtr$0 = enemyX;
+        enemyPtr$4 = enemyY;
+        circle(floor(enemyX), floor(enemyY), enemySize, enemyColor);
+        i += 1;
+        branch EnemyDraw;}
+    }}
+    
     i = (GHOST_FPS * (time() - prevTimeGhost)) as i32;
     loop ghostsToAdd {
         if i {
